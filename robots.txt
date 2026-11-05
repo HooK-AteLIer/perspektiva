@@ -1,0 +1,4 @@
+# Демонстрационная версия; страницы помечены noindex.
+User-agent: *
+Allow: /perspektiva/
+Sitemap: https://hook-atelier.github.io/perspektiva/sitemap.xml
