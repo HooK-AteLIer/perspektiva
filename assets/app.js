@@ -149,24 +149,112 @@
     }
   }
 
-  // Гейт сидов: один сид в пути, новые цели схлопываются в последнюю, ошибка снимает блокировку
-  function makeSeekGate(v, isReady) {
+  // Safari/WKWebView может ждать нажатия даже для muted-видео. Прогреваем
+  // декодер через play/pause; запрет запуска оставляет возможность повторить.
+  function prepareScrollVideo(v, { isCurrent, onReady, onBlocked, onError }) {
+    let disposed = false;
+    let ready = false;
+    let priming = false;
+    let requiresGesture = false;
+    let timer = null;
+    const active = () => !disposed && isCurrent();
+    const blocked = () => {
+      if (active() && !ready) { priming = false; onBlocked(); }
+    };
+    const markReady = () => {
+      if (!active() || ready || requiresGesture || v.readyState < 2) return;
+      ready = true;
+      clearTimeout(timer);
+      v.pause();
+      onReady();
+    };
+    const activate = () => {
+      if (!active() || ready || priming || !v.getAttribute('src')) return;
+      priming = true;
+      try {
+        const playing = v.play();
+        if (playing && typeof playing.then === 'function') {
+          playing.then(() => {
+            if (!active()) return;
+            requiresGesture = false;
+            v.pause();
+            markReady();
+          }).catch((error) => {
+            priming = false;
+            if (!active() || ready) return;
+            if (error.name === 'NotAllowedError' || error.name === 'AbortError') {
+              requiresGesture = error.name === 'NotAllowedError';
+              blocked();
+            }
+            else onError(error);
+          });
+        }
+      } catch (error) {
+        priming = false;
+        if (error.name === 'NotAllowedError') { requiresGesture = true; blocked(); }
+        else onError(error);
+      }
+    };
+    const metadata = () => {
+      // Не меняем currentTime до первого декодированного кадра.
+      if (v.readyState >= 2) markReady();
+      else activate();
+    };
+    const error = () => { if (active()) onError(v.error); };
+    const events = [['loadedmetadata', metadata], ['loadeddata', markReady], ['canplay', markReady], ['playing', markReady], ['error', error]];
+    events.forEach(([name, fn]) => v.addEventListener(name, fn));
+    return {
+      load(url) {
+        v.muted = true;
+        v.defaultMuted = true;
+        v.playsInline = true;
+        v.setAttribute('playsinline', '');
+        v.setAttribute('webkit-playsinline', '');
+        v.preload = 'auto';
+        v.src = url;
+        timer = setTimeout(blocked, 8000);
+        v.load();
+      },
+      activate,
+      dispose() {
+        disposed = true;
+        clearTimeout(timer);
+        events.forEach(([name, fn]) => v.removeEventListener(name, fn));
+        v.pause();
+      }
+    };
+  }
+
+  // Один seek в пути. Таймер освобождает гейт, если WebKit потерял seeked,
+  // а действительно зависшую перемотку переводит в повторяемую загрузку.
+  function makeSeekGate(v, isReady, onStall = () => {}) {
     let busy = false;
     let pending = null;
+    let timer = null;
+    const reset = () => { busy = false; pending = null; clearTimeout(timer); };
+    const complete = () => {
+      busy = false;
+      clearTimeout(timer);
+      if (pending !== null) { const t = pending; pending = null; req(t); }
+    };
     const req = (t) => {
       if (!isReady() || !v.duration) return;
       t = clamp(t, 0, v.duration - 0.04);
       if (busy) { pending = t; return; }
       if (Math.abs(v.currentTime - t) < 0.001) return;
       busy = true;
-      v.currentTime = t;
+      try {
+        v.currentTime = t;
+        timer = setTimeout(() => {
+          if (!v.seeking) complete();
+          else { reset(); onStall(); }
+        }, 2000);
+      } catch (error) { reset(); onStall(error); }
     };
-    v.addEventListener('seeked', () => {
-      busy = false;
-      if (pending !== null) { const t = pending; pending = null; req(t); }
-    });
-    v.addEventListener('error', () => { busy = false; pending = null; });
-    req.reset = () => { busy = false; pending = null; };
+    v.addEventListener('seeked', complete);
+    v.addEventListener('timeupdate', () => { if (busy && !v.seeking) complete(); });
+    v.addEventListener('error', reset);
+    req.reset = reset;
     return req;
   }
 
@@ -187,6 +275,9 @@
   const posterLayer = $('.poster');
   const ring = $('.ring');
   const cue = $('.cue');
+  const videoActivation = $('#video-activation');
+  const videoStart = $('#video-start');
+  const appleTouch = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   const bands = $$('.band').map((el, i) => {
     const [a, b] = el.dataset.band.split(',').map(Number);
     return { el, i, a, b, ramp: el.dataset.ramp ? Number(el.dataset.ramp) : null, op: -1, k: -1, interactive: !!el.querySelector('a,button') };
@@ -208,6 +299,9 @@
   let loadToken = 0;     // каждая смена источника получает свой номер; устаревшие загрузки молча выходят
   let fetchCtrl = null;
   let blobUrl = null;
+  let heroPlayback = null;
+  let nativeHeroSource = appleTouch;
+  let motionRequested = false;
   let savedP = 0;        // прогресс героя до поворота: по нему восстанавливаем прокрутку
   let lastW = innerWidth;
   let resizedAt = 0;
@@ -243,30 +337,17 @@
     }
   }
 
-  // гейт сидов: никогда не пишем currentTime, пока предыдущий сид в пути
-  let seekBusy = false;
-  let pendingTime = null;
-  function requestSeek(t) {
-    if (!videoReady || !video.duration) return;
-    t = clamp(t, 0, video.duration - 0.04);
-    if (seekBusy) { pendingTime = t; return; }
-    if (Math.abs(video.currentTime - t) < 0.001) return;
-    seekBusy = true;
-    video.currentTime = t;
+  const requestSeek = makeSeekGate(video, () => videoReady, failVideo);
+
+  function showVideoActivation(label = 'Включить анимацию') {
+    videoActivation.hidden = false;
+    videoStart.textContent = label;
+    stage.classList.add('needs-video-start');
   }
-  video.addEventListener('seeked', () => {
-    seekBusy = false;
-    if (pendingTime !== null) {
-      const t = pendingTime;
-      pendingTime = null;
-      requestSeek(t);
-    }
-  });
-  video.addEventListener('error', () => {
-    seekBusy = false;
-    pendingTime = null;
-    if (video.getAttribute('src')) failVideo();
-  });
+  function hideVideoActivation() {
+    videoActivation.hidden = true;
+    stage.classList.remove('needs-video-start');
+  }
 
   function tick(now) {
     const dt = Math.min(100, now - (lastTick || now));
@@ -332,11 +413,13 @@
     const token = ++loadToken;
     const selected = SOURCES[key];
     const src = { ...selected, video: selected.video + '?v=sand-original-20261106-r4', poster: selected.poster + '?v=sand-original-20261106-r4' };
+    if (heroPlayback) heroPlayback.dispose();
     if (fetchCtrl) fetchCtrl.abort();
     fetchCtrl = null;
     videoReady = false;
-    seekBusy = false;
-    pendingTime = null;
+    requestSeek.reset();
+    hideVideoActivation();
+    stage.dataset.videoState = 'loading';
     stage.classList.remove('video-ready', 'loaded');
     ring.style.setProperty('--ld', 126);
     if (blobUrl) {
@@ -347,6 +430,30 @@
     }
     // постер выигрывает гонку за канал: сначала он, потом поток видео
     posterLayer.style.backgroundImage = `url('${src.poster}')`;
+    heroPlayback = prepareScrollVideo(video, {
+      isCurrent: () => token === loadToken && scrubOn,
+      onReady: () => {
+        videoReady = true;
+        stage.dataset.videoState = 'ready';
+        stage.classList.add('loaded', 'video-ready');
+        ring.style.setProperty('--ld', 0);
+        hideVideoActivation();
+        target = shown = heroProgress();
+        requestSeek(shown * video.duration);
+        updateCaptions(shown);
+      },
+      onBlocked: () => {
+        stage.dataset.videoState = 'waiting-for-tap';
+        showVideoActivation();
+      },
+      onError: failVideo
+    });
+    // На iPhone используем нативную загрузку MP4: хостинг проверен на
+    // Range/206. В остальных браузерах сохраняем потоковую загрузку Blob.
+    if (nativeHeroSource) {
+      heroPlayback.load(src.video);
+      return;
+    }
     let started = false;
     const startBlobFetch = () => {
       if (started || token !== loadToken) return;
@@ -371,20 +478,7 @@
       ring.style.setProperty('--ld', 0);
       stage.classList.add('loaded');
       blobUrl = URL.createObjectURL(blob);
-      // loadeddata, а не canplay: Safari на iOS без жеста может не дойти до canplay, а первый кадр уже есть
-      video.addEventListener('loadeddata', () => {
-        if (token !== loadToken) return;
-        videoReady = true;
-        stage.classList.add('video-ready');
-        target = shown = heroProgress();
-        requestSeek(shown * video.duration);
-        updateCaptions(shown);
-      }, { once: true });
-      video.preload = 'auto';
-      video.src = blobUrl;
-      video.load();
-      // ролик скачан, но не декодируется: через 8 с честно уходим в статичный герой
-      setTimeout(() => { if (token === loadToken && !videoReady && scrubOn) failVideo(); }, 8000);
+      heroPlayback.load(blobUrl);
     } finally {
       if (fetchCtrl === ctrl) fetchCtrl = null;
     }
@@ -395,6 +489,11 @@
     if (videoFailed) return;
     videoFailed = true;
     videoReady = false;
+    requestSeek.reset();
+    if (heroPlayback) heroPlayback.dispose();
+    stage.classList.remove('video-ready');
+    stage.dataset.videoState = 'failed';
+    showVideoActivation('Повторить загрузку');
     applyHeroMode();
   }
 
@@ -427,13 +526,20 @@
   function disableScrub() {
     if (!scrubOn) return;
     scrubOn = false;
+    ++loadToken;
+    if (fetchCtrl) fetchCtrl.abort();
+    if (heroPlayback) heroPlayback.dispose();
+    heroPlayback = null;
+    srcKey = null;
+    videoReady = false;
+    requestSeek.reset();
     removeEventListener('scroll', onScroll);
     removeEventListener('resize', onResize);
     if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; lastTick = 0; }
     bands.forEach((b) => { if (b.interactive) b.el.inert = false; });
   }
   function applyHeroMode() {
-    const makeStatic = reducedMotion.matches || videoFailed;
+    const makeStatic = (reducedMotion.matches && !motionRequested) || videoFailed;
     if (makeStatic === root.classList.contains('static-hero') && makeStatic === !scrubOn) return;
     // высота героя меняется: если посетитель уже ниже героя, держим на месте то, что он читает
     const next = hero.nextElementSibling;
@@ -450,6 +556,21 @@
   portraitMQ.addEventListener('change', () => {
     if (scrubOn) loadSource(portraitMQ.matches ? 'tall' : 'wide');
   });
+  videoStart.addEventListener('click', () => {
+    motionRequested = true;
+    if (videoFailed || !scrubOn || !heroPlayback) {
+      videoFailed = false;
+      srcKey = null;
+      nativeHeroSource = true;
+      applyHeroMode();
+    }
+    // play() вызывается синхронно в обработчике нажатия, пока действует
+    // разрешение пользователя во встроенном браузере iPhone.
+    if (heroPlayback) heroPlayback.activate();
+  });
+  stage.addEventListener('touchend', () => {
+    if (scrubOn && !videoReady && !videoFailed && heroPlayback) heroPlayback.activate();
+  }, { passive: true });
 
   /* ============================================================
      5. Линии, которые рисуются скроллом
@@ -1071,10 +1192,13 @@
   $$('.draw').forEach((el) => drawIO.observe(el));
 
   reducedMotion.addEventListener('change', (e) => {
+    motionRequested = false;
     if (e.matches) pinToFinalStates();
     else unpinFinalStates();
     applyHeroMode(); // скраб включается и выключается через тот же гейт
+    if (e.matches) showVideoActivation();
   });
   if (reducedMotion.matches) pinToFinalStates();
   applyHeroMode();
+  if (reducedMotion.matches) showVideoActivation();
 })();
