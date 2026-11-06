@@ -177,8 +177,8 @@
   const PORTRAIT = '(orientation: portrait) and (max-width: 1024px)';
   const REDUCED = '(prefers-reduced-motion: reduce)';
   const SOURCES = {
-    wide: { video: 'assets/hourglass-scrub.mp4', bytes: 593004, poster: 'assets/hourglass-poster.jpg' },
-    tall: { video: 'assets/hourglass-scrub-phone.mp4', bytes: 298734, poster: 'assets/hourglass-poster-phone.jpg' }
+    wide: { video: 'assets/hourglass-scrub.mp4', bytes: 1642575, poster: 'assets/hourglass-poster.jpg' },
+    tall: { video: 'assets/hourglass-scrub-phone.mp4', bytes: 879229, poster: 'assets/hourglass-poster-phone.jpg' }
   };
   const root = document.documentElement;
   const hero = $('.hero');
@@ -331,7 +331,7 @@
     srcKey = key;
     const token = ++loadToken;
     const selected = SOURCES[key];
-    const src = { ...selected, video: selected.video + '?v=sand-20261106-v3', poster: selected.poster + '?v=sand-20261106-v3' };
+    const src = { ...selected, video: selected.video + '?v=sand-original-20261106-r4', poster: selected.poster + '?v=sand-original-20261106-r4' };
     if (fetchCtrl) fetchCtrl.abort();
     fetchCtrl = null;
     videoReady = false;

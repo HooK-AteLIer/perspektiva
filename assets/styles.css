@@ -274,13 +274,13 @@ body.paused *,body.paused *::before,body.paused *::after{animation-play-state:pa
 
 /* ---------- Статичный герой: reduced motion, ошибка видео, нет JS ---------- */
 :is(.static-hero,html:not(.js)) .hero{height:auto}
-:is(.static-hero,html:not(.js)) .stage{position:relative;height:100vh;height:100svh;min-height:560px;background:var(--glass-bg) url('hourglass-ending.jpg?v=sand-20261106-v3') center/cover no-repeat}
+:is(.static-hero,html:not(.js)) .stage{position:relative;height:100vh;height:100svh;min-height:560px;background:var(--glass-bg) url('hourglass-ending.jpg?v=sand-original-20261106-r4') center/cover no-repeat}
 :is(.static-hero,html:not(.js)) .media .poster,:is(.static-hero,html:not(.js)) .media video,:is(.static-hero,html:not(.js)) .cue{display:none}
 :is(.static-hero,html:not(.js)) .band{display:none}
 :is(.static-hero,html:not(.js)) .band-1{display:block;opacity:1!important;--k:1!important}
 :is(.static-hero,html:not(.js)) .static-only{display:flex;margin-top:26px}
 @media (orientation: portrait) and (max-width: 1024px){
-  :is(.static-hero,html:not(.js)) .stage{background-image:url('hourglass-ending-phone.jpg?v=sand-20261106-v3')}
+  :is(.static-hero,html:not(.js)) .stage{background-image:url('hourglass-ending-phone.jpg?v=sand-original-20261106-r4')}
   :is(.static-hero,html:not(.js)) .band-1{top:auto;bottom:calc(20px + env(safe-area-inset-bottom))}
   :is(.static-hero,html:not(.js)) .band-1::before{inset:-120px -50vw calc(-22px - env(safe-area-inset-bottom));
     background:linear-gradient(to top,rgba(3,9,20,.9) 0,rgba(3,9,20,.84) calc(100% - 120px),rgba(3,9,20,.4) calc(100% - 50px),rgba(3,9,20,0) 100%)}
