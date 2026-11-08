@@ -149,82 +149,6 @@
     }
   }
 
-  // Safari/WKWebView может ждать нажатия даже для muted-видео. Прогреваем
-  // декодер через play/pause; запрет запуска оставляет возможность повторить.
-  function prepareScrollVideo(v, { isCurrent, onReady, onBlocked, onError }) {
-    let disposed = false;
-    let ready = false;
-    let priming = false;
-    let requiresGesture = false;
-    let timer = null;
-    const active = () => !disposed && isCurrent();
-    const blocked = () => {
-      if (active() && !ready) { priming = false; onBlocked(); }
-    };
-    const markReady = () => {
-      if (!active() || ready || requiresGesture || v.readyState < 2) return;
-      ready = true;
-      clearTimeout(timer);
-      v.pause();
-      onReady();
-    };
-    const activate = () => {
-      if (!active() || ready || priming || !v.getAttribute('src')) return;
-      priming = true;
-      try {
-        const playing = v.play();
-        if (playing && typeof playing.then === 'function') {
-          playing.then(() => {
-            if (!active()) return;
-            requiresGesture = false;
-            v.pause();
-            markReady();
-          }).catch((error) => {
-            priming = false;
-            if (!active() || ready) return;
-            if (error.name === 'NotAllowedError' || error.name === 'AbortError') {
-              requiresGesture = error.name === 'NotAllowedError';
-              blocked();
-            }
-            else onError(error);
-          });
-        }
-      } catch (error) {
-        priming = false;
-        if (error.name === 'NotAllowedError') { requiresGesture = true; blocked(); }
-        else onError(error);
-      }
-    };
-    const metadata = () => {
-      // Не меняем currentTime до первого декодированного кадра.
-      if (v.readyState >= 2) markReady();
-      else activate();
-    };
-    const error = () => { if (active()) onError(v.error); };
-    const events = [['loadedmetadata', metadata], ['loadeddata', markReady], ['canplay', markReady], ['playing', markReady], ['error', error]];
-    events.forEach(([name, fn]) => v.addEventListener(name, fn));
-    return {
-      load(url) {
-        v.muted = true;
-        v.defaultMuted = true;
-        v.playsInline = true;
-        v.setAttribute('playsinline', '');
-        v.setAttribute('webkit-playsinline', '');
-        v.preload = 'auto';
-        v.src = url;
-        timer = setTimeout(blocked, 8000);
-        v.load();
-      },
-      activate,
-      dispose() {
-        disposed = true;
-        clearTimeout(timer);
-        events.forEach(([name, fn]) => v.removeEventListener(name, fn));
-        v.pause();
-      }
-    };
-  }
-
   // Один seek в пути. Таймер освобождает гейт, если WebKit потерял seeked,
   // а действительно зависшую перемотку переводит в повторяемую загрузку.
   function makeSeekGate(v, isReady, onStall = () => {}) {
@@ -259,34 +183,36 @@
   }
 
   /* ============================================================
-     3a. Герой: две версии ролика, Blob + кольцо + watchdog, lerp с dt, гейт сидов
+     3a. Часы: кадры прежнего ролика, JPEG + transform, без видеоплеера.
+        Один механизм на телефоне и компьютере, прогресс задаётся прокруткой.
      ============================================================ */
-  // Портрет до 1024px получает вертикальный ролик, всё остальное 16:9. Строка та же, что в styles.css.
   const PORTRAIT = '(orientation: portrait) and (max-width: 1024px)';
   const REDUCED = '(prefers-reduced-motion: reduce)';
+  const frameSource = (kind, width, height) => ({
+    width, height, count: 60, columns: 3, rows: 2, perSheet: 6,
+    sheets: Array.from({ length: 10 }, (_, i) => `assets/hourglass-frames/${kind}-${String(i).padStart(2, '0')}.jpg`)
+  });
   const SOURCES = {
-    wide: { video: 'assets/hourglass-scrub.mp4', bytes: 1642575, poster: 'assets/hourglass-poster.jpg' },
-    tall: { video: 'assets/hourglass-scrub-phone.mp4', bytes: 879229, poster: 'assets/hourglass-poster-phone.jpg' }
+    wide: { poster: 'assets/hourglass-poster.jpg', frames: frameSource('wide', 896, 506) },
+    tall: { poster: 'assets/hourglass-poster-phone.jpg', frames: frameSource('tall', 432, 768) }
   };
   const root = document.documentElement;
   const hero = $('.hero');
   const stage = $('#stage');
-  const video = $('#hero-video');
+  const framesElement = $('#hero-frames');
   const posterLayer = $('.poster');
   const ring = $('.ring');
   const cue = $('.cue');
-  const videoActivation = $('#video-activation');
-  const videoStart = $('#video-start');
-  const appleTouch = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const motionControl = $('#motion-control');
+  const motionStart = $('#motion-start');
+  const motionHint = $('#motion-hint');
   const bands = $$('.band').map((el, i) => {
     const [a, b] = el.dataset.band.split(',').map(Number);
     return { el, i, a, b, ramp: el.dataset.ramp ? Number(el.dataset.ramp) : null, op: -1, k: -1, interactive: !!el.querySelector('a,button') };
   });
   const lastBand = bands.length - 1;
-
   let scrubOn = false;
-  let videoReady = false;
-  let videoFailed = false;
+  let framesFailed = false;
   let heroOnScreen = true;
   let target = 0;
   let shown = 0;
@@ -295,14 +221,11 @@
   let loadK = 0;
   let loadRampRunning = false;
   let cueGone = null;
-  let srcKey = null;     // какая версия ролика сейчас загружена или грузится
-  let loadToken = 0;     // каждая смена источника получает свой номер; устаревшие загрузки молча выходят
-  let fetchCtrl = null;
-  let blobUrl = null;
-  let heroPlayback = null;
-  let nativeHeroSource = appleTouch;
+  let srcKey = null;
+  let loadToken = 0;
+  let frameRenderer = null;
   let motionRequested = false;
-  let savedP = 0;        // прогресс героя до поворота: по нему восстанавливаем прокрутку
+  let savedP = 0;
   let lastW = innerWidth;
   let resizedAt = 0;
 
@@ -311,7 +234,6 @@
     const range = heroRange();
     return range > 0 ? clamp(-hero.getBoundingClientRect().top / range, 0, 1) : 0;
   }
-
   function updateCaptions(p) {
     for (const b of bands) {
       const f = Math.min(0.02, (b.b - b.a) / 3);
@@ -331,52 +253,37 @@
       }
     }
     const gone = p > 0.03;
-    if (gone !== cueGone) {
-      cueGone = gone;
-      cue.classList.toggle('gone', gone);
-    }
+    if (gone !== cueGone) { cueGone = gone; cue.classList.toggle('gone', gone); }
   }
-
-  const requestSeek = makeSeekGate(video, () => videoReady, failVideo);
-
-  function showVideoActivation(label = 'Включить анимацию') {
-    videoActivation.hidden = false;
-    videoStart.textContent = label;
-    stage.classList.add('needs-video-start');
+  function showMotionControl(label = 'Показывать движение', hint = 'На устройстве включено уменьшение движения.') {
+    motionControl.hidden = false;
+    motionStart.textContent = label;
+    motionHint.textContent = hint;
+    stage.classList.add('needs-motion-control');
   }
-  function hideVideoActivation() {
-    videoActivation.hidden = true;
-    stage.classList.remove('needs-video-start');
+  function hideMotionControl() {
+    motionControl.hidden = true;
+    stage.classList.remove('needs-motion-control');
   }
-
   function tick(now) {
     const dt = Math.min(100, now - (lastTick || now));
     lastTick = now;
-    const k = 0.16;
-    shown += (target - shown) * (1 - Math.pow(1 - k, dt / 16.667));
-    if (Math.abs(target - shown) < 0.0005) {
-      shown = target;
-      rafId = null;
-      lastTick = 0;
-    } else {
-      rafId = requestAnimationFrame(tick);
-    }
-    requestSeek(shown * (video.duration || 0));
+    shown += (target - shown) * (1 - Math.pow(1 - 0.16, dt / 16.667));
+    if (Math.abs(target - shown) < 0.0005) { shown = target; rafId = null; lastTick = 0; }
+    else rafId = requestAnimationFrame(tick);
+    if (frameRenderer) frameRenderer.seek(shown);
     updateCaptions(shown);
   }
-
   function onScroll() {
     if (!scrubOn) return;
     target = heroProgress();
-    // прокрутка, которую браузер сам сдвинул при повороте, не должна затирать сохранённую позицию
     if (performance.now() - resizedAt > 400) savedP = target;
     if (rafId === null && heroOnScreen) rafId = requestAnimationFrame(tick);
   }
-
-  // Поворот или смена ширины: высота героя в px меняется, возвращаем посетителя в ту же долю прокрутки героя
   function onResize() {
     resizedAt = performance.now();
-    if (innerWidth === lastW) { onScroll(); return; } // адресная строка: только высота, ничего не двигаем
+    if (frameRenderer) frameRenderer.resize();
+    if (innerWidth === lastW) { onScroll(); return; }
     lastW = innerWidth;
     const p = savedP;
     requestAnimationFrame(() => {
@@ -384,14 +291,12 @@
         const top = hero.getBoundingClientRect().top + scrollY;
         scrollTo({ top: Math.round(top + p * heroRange()), behavior: 'instant' });
       }
-      target = shown = heroProgress();
-      savedP = target;
+      target = shown = savedP = heroProgress();
       bands.forEach((b) => { b.op = -1; b.k = -1; });
       updateCaptions(shown);
-      requestSeek(shown * (video.duration || 0));
+      if (frameRenderer) { frameRenderer.resize(); frameRenderer.seek(shown); }
     });
   }
-
   function runLoadRamp() {
     if (loadRampRunning || loadK >= 1) return;
     loadRampRunning = true;
@@ -405,110 +310,51 @@
     };
     requestAnimationFrame(step);
   }
-
-  // Загрузка нужной версии. Смена версии: обрываем прежний поток, освобождаем старый Blob, начинаем с постера.
   function loadSource(key) {
     if (key === srcKey) return;
     srcKey = key;
     const token = ++loadToken;
-    const selected = SOURCES[key];
-    const src = { ...selected, video: selected.video + '?v=sand-original-20261106-r4', poster: selected.poster + '?v=sand-original-20261106-r4' };
-    if (heroPlayback) heroPlayback.dispose();
-    if (fetchCtrl) fetchCtrl.abort();
-    fetchCtrl = null;
-    videoReady = false;
-    requestSeek.reset();
-    hideVideoActivation();
-    stage.dataset.videoState = 'loading';
-    stage.classList.remove('video-ready', 'loaded');
+    if (frameRenderer) frameRenderer.destroy();
+    frameRenderer = null;
+    stage.classList.remove('frames-ready', 'loaded');
+    stage.dataset.heroRenderer = 'jpeg-frames';
+    stage.dataset.motionState = 'loading';
     ring.style.setProperty('--ld', 126);
-    if (blobUrl) {
-      video.removeAttribute('src');
-      video.load();
-      URL.revokeObjectURL(blobUrl);
-      blobUrl = null;
-    }
-    // постер выигрывает гонку за канал: сначала он, потом поток видео
-    posterLayer.style.backgroundImage = `url('${src.poster}')`;
-    heroPlayback = prepareScrollVideo(video, {
-      isCurrent: () => token === loadToken && scrubOn,
+    hideMotionControl();
+    const source = SOURCES[key];
+    posterLayer.style.backgroundImage = `url('${source.poster}?v=sand-original-20261106-r4')`;
+    if (typeof window.PSPFrameSequence !== 'function') { failFrames(); return; }
+    frameRenderer = window.PSPFrameSequence(framesElement, source.frames, {
       onReady: () => {
-        videoReady = true;
-        stage.dataset.videoState = 'ready';
-        stage.classList.add('loaded', 'video-ready');
+        if (token !== loadToken || !scrubOn) return;
+        stage.dataset.motionState = 'ready';
+        stage.classList.add('loaded', 'frames-ready');
         ring.style.setProperty('--ld', 0);
-        hideVideoActivation();
-        target = shown = heroProgress();
-        requestSeek(shown * video.duration);
+        hideMotionControl();
         updateCaptions(shown);
       },
-      onBlocked: () => {
-        stage.dataset.videoState = 'waiting-for-tap';
-        showVideoActivation();
-      },
-      onError: failVideo
+      onError: () => { if (token === loadToken && scrubOn) failFrames(); }
     });
-    // На iPhone используем нативную загрузку MP4: хостинг проверен на
-    // Range/206. В остальных браузерах сохраняем потоковую загрузку Blob.
-    if (nativeHeroSource) {
-      heroPlayback.load(src.video);
-      return;
-    }
-    let started = false;
-    const startBlobFetch = () => {
-      if (started || token !== loadToken) return;
-      started = true;
-      loadHeroBlob(src, token).catch((e) => { if (token === loadToken) failVideo(e); });
-    };
-    const posterImg = new Image();
-    posterImg.onload = startBlobFetch;
-    posterImg.onerror = startBlobFetch;
-    posterImg.src = src.poster;
-    setTimeout(startBlobFetch, 4000);
+    frameRenderer.seek(shown);
   }
-
-  async function loadHeroBlob(src, token) {
-    const ctrl = new AbortController();
-    fetchCtrl = ctrl;
-    try {
-      const blob = await streamBlob(src.video, src.bytes, ctrl, (frac) => {
-        if (token === loadToken) ring.style.setProperty('--ld', Math.round(126 * (1 - frac)));
-      });
-      if (token !== loadToken) return;
-      ring.style.setProperty('--ld', 0);
-      stage.classList.add('loaded');
-      blobUrl = URL.createObjectURL(blob);
-      heroPlayback.load(blobUrl);
-    } finally {
-      if (fetchCtrl === ctrl) fetchCtrl = null;
-    }
-  }
-
-  // Видео не пришло: статичный герой (конечный кадр нужной ориентации + тексты), страница остаётся целой
-  function failVideo() {
-    if (videoFailed) return;
-    videoFailed = true;
-    videoReady = false;
-    requestSeek.reset();
-    if (heroPlayback) heroPlayback.dispose();
-    stage.classList.remove('video-ready');
-    stage.dataset.videoState = 'failed';
-    showVideoActivation('Повторить загрузку');
+  function failFrames() {
+    if (framesFailed) return;
+    framesFailed = true;
+    stage.dataset.motionState = 'failed';
+    stage.classList.remove('frames-ready');
     applyHeroMode();
+    showMotionControl('Повторить загрузку', 'Не удалось загрузить изображение. Попробуйте ещё раз.');
   }
-
   new IntersectionObserver((entries) => {
     heroOnScreen = entries[0].isIntersecting;
     if (heroOnScreen) onScroll();
   }).observe(hero);
 
   /* ============================================================
-     4. Режим героя: скраб везде, статичный только для reduced motion и при ошибке видео.
-        Решается живо: поворот меняет версию ролика, смена предпочтения включает и выключает скраб.
+     4. Статичный режим только по настройке уменьшения движения или ошибке.
      ============================================================ */
   const portraitMQ = matchMedia(PORTRAIT);
   const reducedMotion = matchMedia(REDUCED);
-
   function enableScrub() {
     if (scrubOn) return;
     scrubOn = true;
@@ -517,8 +363,8 @@
     bands.forEach((b) => { b.op = -1; b.k = -1; });
     cueGone = null;
     unpinFinalStates();
-    loadSource(portraitMQ.matches ? 'tall' : 'wide');
     target = shown = savedP = heroProgress();
+    loadSource(portraitMQ.matches ? 'tall' : 'wide');
     updateCaptions(shown);
     onScroll();
     runLoadRamp();
@@ -527,27 +373,22 @@
     if (!scrubOn) return;
     scrubOn = false;
     ++loadToken;
-    if (fetchCtrl) fetchCtrl.abort();
-    if (heroPlayback) heroPlayback.dispose();
-    heroPlayback = null;
+    if (frameRenderer) frameRenderer.destroy();
+    frameRenderer = null;
     srcKey = null;
-    videoReady = false;
-    requestSeek.reset();
     removeEventListener('scroll', onScroll);
     removeEventListener('resize', onResize);
     if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; lastTick = 0; }
     bands.forEach((b) => { if (b.interactive) b.el.inert = false; });
   }
   function applyHeroMode() {
-    const makeStatic = (reducedMotion.matches && !motionRequested) || videoFailed;
+    const makeStatic = (reducedMotion.matches && !motionRequested) || framesFailed;
     if (makeStatic === root.classList.contains('static-hero') && makeStatic === !scrubOn) return;
-    // высота героя меняется: если посетитель уже ниже героя, держим на месте то, что он читает
     const next = hero.nextElementSibling;
     const anchorTop = next ? next.getBoundingClientRect().top : 0;
     const below = anchorTop < innerHeight * 0.5;
     root.classList.toggle('static-hero', makeStatic);
-    if (makeStatic) disableScrub();
-    else enableScrub();
+    if (makeStatic) disableScrub(); else enableScrub();
     if (next && below) {
       const shift = next.getBoundingClientRect().top - anchorTop;
       if (Math.abs(shift) > 1) scrollBy({ top: shift, behavior: 'instant' });
@@ -556,21 +397,11 @@
   portraitMQ.addEventListener('change', () => {
     if (scrubOn) loadSource(portraitMQ.matches ? 'tall' : 'wide');
   });
-  videoStart.addEventListener('click', () => {
+  motionStart.addEventListener('click', () => {
     motionRequested = true;
-    if (videoFailed || !scrubOn || !heroPlayback) {
-      videoFailed = false;
-      srcKey = null;
-      nativeHeroSource = true;
-      applyHeroMode();
-    }
-    // play() вызывается синхронно в обработчике нажатия, пока действует
-    // разрешение пользователя во встроенном браузере iPhone.
-    if (heroPlayback) heroPlayback.activate();
+    framesFailed = false;
+    applyHeroMode();
   });
-  stage.addEventListener('touchend', () => {
-    if (scrubOn && !videoReady && !videoFailed && heroPlayback) heroPlayback.activate();
-  }, { passive: true });
 
   /* ============================================================
      5. Линии, которые рисуются скроллом
@@ -1196,9 +1027,9 @@
     if (e.matches) pinToFinalStates();
     else unpinFinalStates();
     applyHeroMode(); // скраб включается и выключается через тот же гейт
-    if (e.matches) showVideoActivation();
+    if (e.matches) showMotionControl();
   });
   if (reducedMotion.matches) pinToFinalStates();
   applyHeroMode();
-  if (reducedMotion.matches) showVideoActivation();
+  if (reducedMotion.matches) showMotionControl();
 })();

@@ -25,11 +25,12 @@
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='3' fill='%230B1923'/perspektiva/%3E%3Crect x='3.5' y='3.5' width='25' height='25' fill='none' stroke='%23D3E3EE' stroke-width='1.4'/perspektiva/%3E%3Cpath d='M3.5 14.5h25' stroke='%23D3E3EE' stroke-width='1.6'/perspektiva/%3E%3Cpath d='M16 14.5 5 28.5M16 14.5 10.5 28.5M16 14.5v14M16 14.5l5.5 14M16 14.5l11 14' stroke='%23D3E3EE' stroke-width='.9'/perspektiva/%3E%3Ccircle cx='16' cy='14.5' r='1.8' fill='%23EDF4F8'/%3E%3C/svg%3E">
 <link rel="preload" href="assets/fonts/cormorant-garamond-normal-cyrillic.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="assets/fonts/manrope-normal-cyrillic.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="assets/styles.css?v=617ba9fff366">
+<link rel="stylesheet" href="assets/styles.css?v=98733bb34fd9">
 <script>document.documentElement.classList.add('js');if(matchMedia('(prefers-reduced-motion: reduce)').matches)document.documentElement.classList.add('static-hero')</script>
 <script src="assets/data.js?v=4c7a6a432b67" defer></script>
 <script src="assets/common.js?v=2a0f9ae80222" defer></script>
-<script src="assets/app.js?v=2b1e38a149f5" defer></script>
+<script src="assets/frame-sequence.js?v=98ec21f0f571" defer></script>
+<script src="assets/app.js?v=1846f2adf502" defer></script>
 
 <meta name="robots" content="noindex, follow">
 </head>
@@ -112,7 +113,7 @@
   <div class="stage" id="stage">
     <div class="media" aria-hidden="true">
       <div class="poster"></div>
-      <video id="hero-video" preload="none" muted playsinline disablepictureinpicture aria-hidden="true" tabindex="-1"></video>
+      <div class="frame-sequence" id="hero-frames" hidden><div class="frame-crop"></div></div>
       <div class="scrim"></div>
       <div class="scrim-top"></div>
     </div>
@@ -145,9 +146,9 @@
       <svg class="chevron" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
       <span>Листайте, песок сыплется</span>
     </div>
-    <div class="video-activation" id="video-activation" hidden>
-      <button class="chip" id="video-start" type="button" aria-controls="hero-video">Включить анимацию</button>
-      <p>Если не запускается, откройте ссылку во внешнем браузере, например Safari.</p>
+    <div class="motion-control" id="motion-control" hidden>
+      <button class="chip" id="motion-start" type="button" aria-controls="hero-frames">Показывать движение</button>
+      <p id="motion-hint">На устройстве включено уменьшение движения.</p>
     </div>
   </div>
 </section>
